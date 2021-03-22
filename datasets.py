@@ -131,7 +131,7 @@ class LungDataset(Dataset):
         return sum(self.dataset_numbers[cls] for cls in self.classes)
 
     def _classify_index(self, index):
-        """Classify and return the updated index, class value, and its corresponding one-hot vector label."""
+        """Classify and return the updated index, class value, and its corresponding label."""
         for label, class_val in enumerate(self.classes):
             max_idx = self.dataset_numbers[class_val]
             if index < max_idx:

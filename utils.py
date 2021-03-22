@@ -198,9 +198,9 @@ def plot_results(images, y_true, y_pred, classes, nrows=5, ncols=5):
     a = images.shape[0]
     sz = nrows * ncols
     if a <= sz:
-        idxs = np.append(np.arange(a), [None]*(sz-a))
+        idxs = np.append(np.random.permutation(a), [None]*(sz-a))
     else:
-        idxs = np.arange(sz)
+        idxs = np.random.choice(a, sz, replace=False)
     axes = axes.flatten()
     for i in range(nrows*ncols):
         idx = idxs[i]
@@ -247,7 +247,7 @@ def plot_history(history, metric='accuracy'):
     l4, = ax2.plot(history["epoch"], history["test_loss"], color="red", linestyle='dotted', label="Test loss")
     ax2.set_ylabel("Loss")
     
-    plt.legend(handles=[l1, l2, l3, l4], bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.legend(handles=[l1, l2, l3, l4], bbox_to_anchor=(1.10, 1), loc='upper left')
     plt.show()
 
 def time_elapsed(start, end):

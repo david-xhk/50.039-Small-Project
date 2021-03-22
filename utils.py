@@ -11,22 +11,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
-def get_dataloaders(dataset, root_dir=None, train_transform=None, test_transform=None, batch_size=64, shuffle=True):
+import sklearn.metrics
+
+def make_dataloader(dataset, batch_size):
+    """Make and return a data loader."""
+    num_samples = len(dataset)
+    class_idxs = torch.Tensor([dataset[i][1] for i in range(num_samples)]).long()
+    sampler = WeightedRandomSampler(dataset.class_weights[class_idxs], num_samples)
+    return DataLoader(dataset, batch_size, sampler=sampler)
+
+def get_dataloaders(dataset_cls, root_dir=None, train_transform=None, test_transform=None, batch_size=64):
     """Create and return the train, test, and val data loaders.
 
     Parameters:
-    - dataset should be the dataset class to use for the data loader.
+    - dataset_cls should be the dataset class to use for the data loader.
     - root_dir should be should be the path to the dataset root directory.
     - train_transform should be a callable to be applied on the train dataset.
     - test_transform should be a callable to be applied on the test and val datasets.
     - batch_size should be an integer for the batch size of the data loader.
     - shuffle should be a boolean for whether to shuffle the data in the data loader.
     """
-    train_loader = DataLoader(dataset('train', root_dir, train_transform), batch_size, shuffle)
-    test_loader = DataLoader(dataset('test', root_dir, test_transform), batch_size, shuffle)
-    val_loader = DataLoader(dataset('val', root_dir, test_transform), batch_size, shuffle)
+    train_loader = make_dataloader(dataset_cls('train', root_dir, test_transform), batch_size)
+    test_loader = make_dataloader(dataset_cls('test', root_dir, test_transform), batch_size)
+    val_loader = make_dataloader(dataset_cls('val', root_dir, test_transform), batch_size)
+    
     return train_loader, test_loader, val_loader
     
 def train_model(model, train_loader, test_loader, device='cuda', epochs=90,
@@ -71,11 +81,11 @@ def train_model(model, train_loader, test_loader, device='cuda', epochs=90,
               f"loss: {results['loss']:.3f} -",
               f"acc: {results['accuracy']:.3f} -",
               f"recall: {results['recall']:.3f} -",
-              f"f1: {results['f1_score']:.3f} -",
+              f"f1: {results['f1']:.3f} -",
               f"test_loss: {test_results['loss']:.3f} -",
               f"test_acc: {test_results['accuracy']:.3f} -",
               f"test_recall: {test_results['recall']:.3f} -",
-              f"test_f1: {test_results['f1_score']:.3f}")
+              f"test_f1: {test_results['f1']:.3f}")
 
         history["timestamp"].append(now)
         history["epoch"].append(epoch)
@@ -127,9 +137,7 @@ def run_model(model, data_loader, device='cuda', optimizer=None, training=False,
         context = torch.no_grad()
     
     if progress:
-        data_loader = tqdm(data_loader, desc=desc)
-    
-    criterion = nn.NLLLoss()
+        progress = tqdm(range(len(data_loader)), desc=desc)
     
     results = {'loss': 0}
     with context:
@@ -142,16 +150,20 @@ def run_model(model, data_loader, device='cuda', optimizer=None, training=False,
             logits = model(images)
             output = F.log_softmax(logits, dim=1)
             
-            current_loss = criterion(output, labels)
+            weights = data_loader.dataset.class_weights
+            current_loss = F.nll_loss(output, labels, weights.to(device))
             results['loss'] += current_loss.item()
             
-            y_true = labels.data
-            y_pred = torch.exp(output).max(dim=1)[1]
-            update_results(y_true, y_pred, results)
+            y_true = labels.data.cpu()
+            y_pred = torch.exp(output).max(dim=1)[1].cpu()
+            update_results(y_true, y_pred, results, weights[labels.long()])
             
             if training:
                 current_loss.backward()
                 optimizer.step()
+            
+            if progress:
+                progress.update()
     
     n = len(data_loader)
     for metric in results:
@@ -162,57 +174,21 @@ def run_model(model, data_loader, device='cuda', optimizer=None, training=False,
     
     return results
 
-def update_results(y_true, y_pred, results=None):
-    """Evaluate the class-wise averaged accuracy, precision, recall, F1-score, and specificity and update and return the results."""
+def update_results(y_true, y_pred, results=None, weights=None):
+    """Evaluate the accuracy, precision, recall, and F1 scores and update and return the results."""
     if results is None:
         results = {}
     
-    metrics = ['accuracy', 'precision', 'recall', 'f1_score', 'specificity']
+    if 'accuracy' not in results:
+        results['accuracy'] = 0
+    results['accuracy'] += sklearn.metrics.accuracy_score(y_true, y_pred)
     
-    for metric in metrics:
+    average = 'weighted' if weights is not None else 'macro'
+    for metric in ['precision', 'recall', 'f1']:
         if metric not in results:
             results[metric] = 0
-    
-    # Get unique classes
-    classes = torch.cat([y_true, y_pred], dim=0).unique().int().tolist()
-    
-    # Compute scores for each class
-    scores = {cls:{'tp':0, 'fp':0, 'tn':0, 'fn':0} for cls in classes}
-    for yp, y in zip(y_pred, y_true):
-        for cls in classes:
-            if cls == y:
-                res = 'tp' if yp == y else 'fn'
-            elif cls == yp:
-                res = 'fp'
-            else:
-                res = 'tn'
-            scores[cls][res] += 1
-    
-    # Compute metrics for each class
-    epsilon = 1e-7
-    for cls in classes:
-        tp = scores[cls]['tp']
-        fp = scores[cls]['fp']
-        tn = scores[cls]['tn']
-        fn = scores[cls]['fn']
-        
-        accuracy    = (tp + tn) / (tp + tn + fp + fn + epsilon)
-        precision   = tp / (tp + fp + epsilon)
-        recall      = tp / (tp + fn + epsilon)
-        f1_score    = 2 * (precision * recall) / (precision + recall + epsilon)
-        specificity = tn / (tn + fp + epsilon)
-        
-        scores[cls]['accuracy'] = accuracy
-        scores[cls]['precision'] = precision
-        scores[cls]['recall'] = recall
-        scores[cls]['f1_score'] = f1_score
-        scores[cls]['specificity'] = specificity
-    
-    # Compute class-wise averaged metrics
-    n = len(classes)
-    for metric in metrics:
-        score = sum(scores[cls][metric] for cls in classes) / n
-        results[metric] += score
+        metric_fn = getattr(sklearn.metrics, metric+'_score')
+        results[metric] += metric_fn(y_true, y_pred, average=average, sample_weight=weights, zero_division=0)
     
     return results
 
@@ -271,7 +247,7 @@ def plot_history(history, metric='accuracy'):
     l4, = ax2.plot(history["epoch"], history["test_loss"], color="red", linestyle='dotted', label="Test loss")
     ax2.set_ylabel("Loss")
     
-    plt.legend(handles=[l1, l2, l3, l4])
+    plt.legend(handles=[l1, l2, l3, l4], bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.show()
 
 def time_elapsed(start, end):

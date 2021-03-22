@@ -59,12 +59,17 @@ class LungDataset(Dataset):
 
         # Three classes will be considered (normal, infected with no covid, infected with covid)
         self.classes = ['normal', 'infected_noncovid', 'infected_covid']
-
+        
+        # Class weights
+        self.class_weights = torch.Tensor([LungDataset.dataset_numbers['train_normal'],
+                                           LungDataset.dataset_numbers['train_infected_noncovid'],
+                                           LungDataset.dataset_numbers['train_infected_covid']])
+        
         # Number of images in each part of the dataset
         self.dataset_numbers = {'normal': LungDataset.dataset_numbers[type_ + '_normal'],
                                 'infected_noncovid': LungDataset.dataset_numbers[type_ + '_infected_noncovid'],
                                 'infected_covid': LungDataset.dataset_numbers[type_ + '_infected_covid']}
-
+        
         # Path to images for different parts of the dataset
         self.dataset_paths = {'normal': os.path.join(root_dir, type_, 'normal'),
                               'infected_noncovid': os.path.join(root_dir, type_, 'infected', 'non-covid'),
@@ -169,6 +174,9 @@ class LungInfectedDataset(LungDataset):
         
         # Only two classes will be considered (normal, infected)
         self.classes = ['normal', 'infected']
+        self.class_weights = torch.Tensor([LungDataset.dataset_numbers['train_normal'],
+                                           LungDataset.dataset_numbers['train_infected_noncovid'] + \
+                                           LungDataset.dataset_numbers['train_infected_covid']])
         
         # Set dataset number and path for 'infected' class
         self.dataset_numbers['infected'] = self.dataset_numbers['infected_noncovid'] + self.dataset_numbers['infected_covid']
@@ -207,6 +215,7 @@ class LungCovidDataset(LungDataset):
         
         # Only two classes will be considered (infected non-covid, infected covid)
         self.classes.remove('normal')
+        self.class_weights = self.class_weights[1:]
         
         # Remove dataset number and path for 'normal' class
         del self.dataset_numbers['normal']

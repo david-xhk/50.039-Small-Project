@@ -9,7 +9,7 @@ class DenseNet(nn.Module):
     
     Adapted from the PyTorch implementation (See https://github.com/pytorch/vision/blob/master/torchvision/models/densenet.py).
     """
-    def __init__(self, num_input_channels=3, growth_rate=32, block_config=(6, 12, 24, 16),
+    def __init__(self, *, num_input_channels=3, growth_rate=32, block_config=(6, 12, 24, 16),
                  num_init_features=64, bn_size=4, drop_rate=0, num_classes=1000):
         """Instantiate the DenseNet.
         

@@ -131,7 +131,7 @@ class LungDataset(Dataset):
         return sum(self.dataset_numbers[cls] for cls in self.classes)
 
     def _classify_index(self, index):
-        """Classify and return the updated index, class value, and its corresponding label."""
+        """Classify and return the updated index, class value, and its corresponding one-hot vector label."""
         for label, class_val in enumerate(self.classes):
             max_idx = self.dataset_numbers[class_val]
             if index < max_idx:
@@ -151,7 +151,7 @@ class LungDataset(Dataset):
         im = self.open_img(class_val, index)
         if self.transform:
             im = self.transform(im)
-        return im, label
+        return transforms.functional.to_tensor(im), label
 
 class LungInfectedDataset(LungDataset):
     """Base class for the lung (normal/infected) dataset.
@@ -214,7 +214,7 @@ class LungCovidDataset(LungDataset):
         super().__init__(type_, root_dir, transform)
         
         # Only two classes will be considered (infected non-covid, infected covid)
-        self.classes.remove('normal')
+        self.classes = self.classes[1:]
         self.class_weights = self.class_weights[1:]
         
         # Remove dataset number and path for 'normal' class

@@ -1,28 +1,76 @@
 from densenet import DenseNet
 
-from tqdm.notebook import tqdm
+from tqdm.auto import tqdm
 from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import contextlib
 import pickle
+import pytz
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, RandomSampler, WeightedRandomSampler
 
 import sklearn.metrics
 
-def make_dataloader(dataset, batch_size):
-    """Make and return a data loader."""
-    num_samples = len(dataset)
-    class_idxs = torch.Tensor([dataset[i][1] for i in range(num_samples)]).long()
-    sampler = WeightedRandomSampler(dataset.class_weights[class_idxs], num_samples)
-    return DataLoader(dataset, batch_size, sampler=sampler)
+def make_model(dataloader_args, model_args, training_args):
+    """Make model function.
+    
+    1. Data loaders are first created using dataloader_args dict (See get_dataloaders function for arguments).
+    
+    2. DenseNet model is initialized with model_args dict (See DenseNet class for initialization arguments).
+    
+    3. Training on the model is carried out according to training_args dict (See train_model function for arguments).
+    
+    4. The learning curve is plotted after training is completed.
+    
+    5. The model and results of training are saved to their respective paths ('model_path' or 'history_path' in training_args, or see save_model and save_history functions for the respective default paths).
+    
+    Finally, the trained model is returned.
+    """
+    train_loader, test_loader, _ = get_dataloaders(**dataloader_args)
 
-def get_dataloaders(dataset_cls, root_dir=None, train_transform=None, test_transform=None, batch_size=64):
+    model = DenseNet(**model_args)
+
+    history = train_model(model, train_loader, test_loader, **training_args)
+    
+    plot_history(history, metric='accuracy')
+    
+    save_model(model, path=training_args.get('model_path'))
+    save_history(history, path=training_args.get('history_path'))
+    
+    return model
+
+def test_model(dataloader_args=None, training_args=None, model=None):
+    """Test model function.
+    
+    If a model is provided or training_args contains a model path, testing will happen:
+    
+        1. If no model is provided, the model is loaded from the model path in training_args.
+
+        2. The validation data loader is created using dataloader_args (See get_dataloaders function for arguments).
+
+        3. The model is tested with the validation data loader and the results are displayed.
+
+    If no model or model_path are provided, no testing happens.
+    """
+    if not isinstance(model, nn.Module) and training_args and 'model_path' in training_args:
+        model = load_model(training_args['model_path'])
+    
+    if model is not None:
+        _, _, val_loader = get_dataloaders(**dataloader_args)
+        
+        results = run_model(model, val_loader, show_results=True)
+        
+        print(f"Validation loss: {results['loss']:.3f} -",
+              f"Validation accuracy: {results['accuracy']:.3f} -",
+              f"Validation F1-score: {results['f1']:.3f} -",
+              f"Validation recall: {results['recall']:.3f}")
+
+def get_dataloaders(*, dataset_cls, root_dir=None, train_transform=None, test_transform=None, batch_size=64, num_samples=None):
     """Create and return the train, test, and val data loaders.
 
     Parameters:
@@ -31,17 +79,51 @@ def get_dataloaders(dataset_cls, root_dir=None, train_transform=None, test_trans
     - train_transform should be a callable to be applied on the train dataset.
     - test_transform should be a callable to be applied on the test and val datasets.
     - batch_size should be an integer for the batch size of the data loader.
-    - shuffle should be a boolean for whether to shuffle the data in the data loader.
+    - num_samples should be an integer for how many training samples to draw if data augmentation is employed.
     """
-    train_loader = make_dataloader(dataset_cls('train', root_dir, test_transform), batch_size)
-    test_loader = make_dataloader(dataset_cls('test', root_dir, test_transform), batch_size)
-    val_loader = make_dataloader(dataset_cls('val', root_dir, test_transform), batch_size)
+    train_dataset = dataset_cls('train', root_dir, train_transform)
+    test_dataset = dataset_cls('test', root_dir, test_transform)
+    val_dataset = dataset_cls('val', root_dir, test_transform)
+    
+    train_loader = make_dataloader(train_dataset, batch_size, sampler='weighted', replacement=True, num_samples=num_samples)
+    test_loader = make_dataloader(test_dataset, batch_size)
+    val_loader = make_dataloader(val_dataset, batch_size)
     
     return train_loader, test_loader, val_loader
+
+def make_dataloader(dataset, batch_size, sampler=None, replacement=False, num_samples=None):
+    """Make and return a data loader.
     
-def train_model(model, train_loader, test_loader, device='cuda', epochs=90,
-                optimizer='Adam', learning_rate=0.01, lr_scheduler=None,
-                save_interval=0, model_path=None, history_path=None):
+    If sampler is set to 'weighted', a weighted random sampler is used.
+    
+    Otherwise, if sampler is set to None, a random sampler is used.
+    
+    If num_samples is not specified, the default is set to len(dataset).
+    """
+    N = len(dataset)
+    if sampler == 'weighted':
+        class_idxs = torch.Tensor([dataset[i][1] for i in range(N)]).long()
+        weights = dataset.class_weights[class_idxs]
+        if num_samples is None or not replacement and num_samples > N:
+            num_samples = N
+        sampler = WeightedRandomSampler(weights, num_samples, replacement)
+    
+    elif sampler is None:
+        if num_samples is None and replacement:
+            num_samples = N
+        elif not replacement:
+            num_samples = None
+        sampler = RandomSampler(dataset, replacement, num_samples)
+    
+    else:
+        err_msg = "sampler should be either 'weighted' or None"
+        raise ValueError(err_msg)
+    
+    return DataLoader(dataset, batch_size, sampler=sampler)
+
+def train_model(model, train_loader, test_loader, *, device='cuda',
+                optimizer='Adam', learning_rate=0.01, patience=30,
+                model_path=None, history_path=None):
     """Train and test the model and return a training history.
 
     Parameters:
@@ -49,34 +131,33 @@ def train_model(model, train_loader, test_loader, device='cuda', epochs=90,
     - train_loader should be able to provide images and labels to train the model.
     - test_loader should be able to provide images and labels to test the model.
     - device should be 'cuda' or 'cpu' for the location to mount the model and images.
-    - epochs should be an integer for the number of epochs to train the model for.
     - optimizer should be a string for which optimizer from the torch.nn to use for training.
     - learning_rate should be a float for what learning rate to use for the optimizer.
-    - lr_scheduler should be a function that takes the epoch and learning rate and returns a new learning rate.
-    - save_interval should be an integer for how many epochs before saving the model and history.
+    - patience should be an integer for how many epochs before activating early stopping.
     - model_path should be a path to store the model.
     - history_path should be a path to store the training history.
     """
+    model.device = device
     model.to(device)
     
     optimizer = getattr(optim, optimizer)(model.parameters(), lr=learning_rate)
     
     history = {'timestamp': [], 'epoch': []}
     
-    start = datetime.now()
+    start = time_now()
     print(f"[{start:%c}] Training started")
     
-    for epoch in tqdm(range(1, epochs+1), desc='Progress'):
-        if lr_scheduler:
-            learning_rate = lr_scheduler(epoch, learning_rate)
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = learning_rate
-        
-        results = run_model(model, train_loader, device, optimizer, training=True, progress=True, desc=f'Epoch {epoch}/{epochs}')
-        
+    min_test_loss = 1e8
+    bad_epochs = 0
+    early_stopping = tqdm(total=patience, desc='Early Stopping', leave=True)
+    
+    epoch = 1
+    while True:
+        results = run_model(model, train_loader, optimizer, training=True, progress=True, desc=f'Epoch {epoch}')
+
         test_results = run_model(model, test_loader)
-        
-        now = datetime.now()
+
+        now = time_now()
         print(f"[{now:%c}] Time elapsed: {time_elapsed(start, now)} -",
               f"loss: {results['loss']:.3f} -",
               f"acc: {results['accuracy']:.3f} -",
@@ -89,34 +170,49 @@ def train_model(model, train_loader, test_loader, device='cuda', epochs=90,
 
         history["timestamp"].append(now)
         history["epoch"].append(epoch)
-        
+
         for k, v in results.items():
             if k not in history:
                 history[k] = []
             history[k].append(v)
-        
+
         for k, v in test_results.items():
             k = 'test_' + k
             if k not in history:
                 history[k] = []
             history[k].append(v)
+
+        if test_results['loss'] >= min_test_loss:
+            bad_epochs += 1
+            early_stopping.update(1)
+            
+            if bad_epochs >= patience:
+                best_epoch = epoch - bad_epochs
+                print(f'Early stopping activated at epoch {epoch} - Minimum test loss was {min_test_loss:.3f} at epoch {best_epoch}')
+                history['early_stopping'] = best_epoch
+                early_stopping.close()
+                break
         
-        if save_interval > 0 and epoch % save_interval == 0:
+        else:
+            min_test_loss = test_results['loss']
             save_model(model, model_path)
-            save_history(history, history_path)
+            
+            bad_epochs = 0
+            early_stopping.reset()
+        
+        epoch += 1
     
-    now = datetime.now()
+    now = time_now()
     print(f"[{now:%c}] Training complete - Time elapsed: {time_elapsed(start, now)}")
     
     return history
 
-def run_model(model, data_loader, device='cuda', optimizer=None, training=False, progress=False, desc=None, show_results=False):
+def run_model(model, data_loader, optimizer=None, training=False, progress=False, desc=None, show_results=False):
     """Run the model with data from the data loader and return the results.
 
     Parameters:
     - model should be able to accept images from the data loader.
     - data_loader should be able to provide images and labels to run the model.
-    - device should be 'cuda' or 'cpu' for the location to mount the model and images.
     - optimizer should be able to be used to train the model parameters.
     - training should be a boolean for whether the model should be trained while running.
     - progress should be a boolean for whether a progress bar should be shown while running.
@@ -137,12 +233,12 @@ def run_model(model, data_loader, device='cuda', optimizer=None, training=False,
         context = torch.no_grad()
     
     if progress:
-        progress = tqdm(range(len(data_loader)), desc=desc)
+        progress_bar = tqdm(total=len(data_loader), desc=desc)
     
     results = {'loss': 0}
     with context:
         for images, labels in data_loader:
-            images, labels = images.to(device), labels.to(device)
+            images, labels = images.to(model.device), labels.to(model.device)
             
             if training:
                 optimizer.zero_grad()
@@ -151,19 +247,23 @@ def run_model(model, data_loader, device='cuda', optimizer=None, training=False,
             output = F.log_softmax(logits, dim=1)
             
             weights = data_loader.dataset.class_weights
-            current_loss = F.nll_loss(output, labels, weights.to(device))
+            current_loss = F.nll_loss(output, labels, weights.to(model.device))
             results['loss'] += current_loss.item()
             
             y_true = labels.data.cpu()
             y_pred = torch.exp(output).max(dim=1)[1].cpu()
-            update_results(y_true, y_pred, results, weights[labels.long()])
+            weights = weights[labels.long()].cpu()
+            update_results(y_true, y_pred, results, weights)
             
             if training:
                 current_loss.backward()
                 optimizer.step()
             
             if progress:
-                progress.update()
+                progress_bar.update(1)
+            
+        if progress:
+            progress_bar.close()
     
     n = len(data_loader)
     for metric in results:
@@ -205,7 +305,7 @@ def plot_results(images, y_true, y_pred, classes, nrows=5, ncols=5):
     for i in range(nrows*ncols):
         idx = idxs[i]
         if idx is not None:
-            im = images[int(idx)].to('cpu').squeeze(dim=0)
+            im = images[int(idx)].cpu().squeeze(dim=0)
             axes[i].imshow(im)
             axes[i].set_title(f'Actual: {classes[y_true[i]]}\nPredicted: {classes[y_pred[i]]}', size=6, y=0.97)
         axes[i].tick_params(which='both', left=False, labelleft=False, bottom=False, labelbottom=False)
@@ -213,7 +313,7 @@ def plot_results(images, y_true, y_pred, classes, nrows=5, ncols=5):
 
 def save_model(model, path='./models/temp.pt'):
     """Save a model at the specified path."""
-    cp = {'model_args': model.args, 'state_dict': model.state_dict()}
+    cp = {'model_args': model.args, 'model_device': model.device, 'state_dict': model.state_dict()}
     torch.save(cp, path)
 
 def load_model(path):
@@ -221,6 +321,8 @@ def load_model(path):
     cp = torch.load(path)
     model = DenseNet(**cp['model_args'])
     model.load_state_dict(cp['state_dict'])
+    model.device = cp['model_device']
+    model.to(model.device)
     return model
 
 def save_history(history, path='./history/temp.pt'):
@@ -238,17 +340,22 @@ def plot_history(history, metric='accuracy'):
     fig, ax = plt.subplots()
     
     l1, = ax.plot(history['epoch'], history[metric], color='blue', label='Training ' + metric)
-    l2, = ax.plot(history['epoch'], history['test_' + metric], color='red', label='Test ' + metric)
+    l2, = ax.plot(history['epoch'], history['test_' + metric], color='orange', label='Test ' + metric)
     ax.set_xlabel("Epoch")
     ax.set_ylabel(metric.title())
     
     ax2 = ax.twinx()
-    l3, = ax2.plot(history["epoch"], history["loss"], color="blue", linestyle='dotted', label="Training loss")
-    l4, = ax2.plot(history["epoch"], history["test_loss"], color="red", linestyle='dotted', label="Test loss")
-    ax2.set_ylabel("Loss")
+    l3, = ax2.plot(history['epoch'], history['loss'], color='blue', linestyle='dotted', label='Training loss')
+    l4, = ax2.plot(history['epoch'], history['test_loss'], color='orange', linestyle='dotted', label='Test loss')
+    ax2.set_ylabel('Loss')
     
-    plt.legend(handles=[l1, l2, l3, l4], bbox_to_anchor=(1.10, 1), loc='upper left')
+    l5 = plt.axvline(x=history['early_stopping'], color='red', linestyle='dashed', label='Early stopping')
+    plt.legend(handles=[l1, l3, l2, l4, l5], bbox_to_anchor=(1.10, 1), loc='upper left')
     plt.show()
+
+def time_now(tz='Singapore'):
+    """Return the current time in the specified timezone."""
+    return datetime.now(tz=pytz.timezone(tz))
 
 def time_elapsed(start, end):
     """Return the time elapsed between start and end as a string in MM:SS format."""

@@ -20,13 +20,9 @@ def make_model(dataloader_args, model_args, training_args):
     """Make model function.
     
     Data loaders are first created using dataloader_args dict (See get_dataloaders function for arguments).
-    
     DenseNet model is initialized with model_args dict (See DenseNet class for initialization arguments).
-    
     Training on the model is carried out according to training_args dict (See train_model function for arguments).
-    
     The learning curve is plotted after training is completed.
-    
     Finally, the trained model is returned.
     """
     train_loader, test_loader, _ = get_dataloaders(**dataloader_args)
@@ -43,11 +39,8 @@ def test_model(dataloader_args=None, training_args=None, model=None):
     """Test model function.
     
     If no model is provided, the model is loaded from the model path in training_args.
-
     The validation data loader is created using dataloader_args (See get_dataloaders function for arguments).
-
     The model is tested with the validation data loader and the results are displayed.
-
     If no model or model_path are provided, no testing happens.
     """
     if not isinstance(model, nn.Module) and training_args and 'model_path' in training_args:
@@ -88,9 +81,7 @@ def make_dataloader(dataset, batch_size, sampler=None, replacement=False, num_sa
     """Make and return a data loader.
     
     If sampler is set to 'weighted', a weighted random sampler is used.
-    
     Otherwise, if sampler is set to None, a random sampler is used.
-    
     If num_samples is not specified, the default is set to len(dataset).
     """
     N = len(dataset)

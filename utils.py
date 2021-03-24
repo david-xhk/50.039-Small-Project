@@ -19,15 +19,13 @@ import sklearn.metrics
 def make_model(dataloader_args, model_args, training_args):
     """Make model function.
     
-    1. Data loaders are first created using dataloader_args dict (See get_dataloaders function for arguments).
+    Data loaders are first created using dataloader_args dict (See get_dataloaders function for arguments).
     
-    2. DenseNet model is initialized with model_args dict (See DenseNet class for initialization arguments).
+    DenseNet model is initialized with model_args dict (See DenseNet class for initialization arguments).
     
-    3. Training on the model is carried out according to training_args dict (See train_model function for arguments).
+    Training on the model is carried out according to training_args dict (See train_model function for arguments).
     
-    4. The learning curve is plotted after training is completed.
-    
-    5. The model and results of training are saved to their respective paths ('model_path' or 'history_path' in training_args, or see save_model and save_history functions for the respective default paths).
+    The learning curve is plotted after training is completed.
     
     Finally, the trained model is returned.
     """
@@ -39,21 +37,16 @@ def make_model(dataloader_args, model_args, training_args):
     
     plot_history(history, metric='accuracy')
     
-    save_model(model, path=training_args.get('model_path'))
-    save_history(history, path=training_args.get('history_path'))
-    
     return model
 
 def test_model(dataloader_args=None, training_args=None, model=None):
     """Test model function.
     
-    If a model is provided or training_args contains a model path, testing will happen:
-    
-        1. If no model is provided, the model is loaded from the model path in training_args.
+    If no model is provided, the model is loaded from the model path in training_args.
 
-        2. The validation data loader is created using dataloader_args (See get_dataloaders function for arguments).
+    The validation data loader is created using dataloader_args (See get_dataloaders function for arguments).
 
-        3. The model is tested with the validation data loader and the results are displayed.
+    The model is tested with the validation data loader and the results are displayed.
 
     If no model or model_path are provided, no testing happens.
     """
@@ -122,7 +115,7 @@ def make_dataloader(dataset, batch_size, sampler=None, replacement=False, num_sa
     return DataLoader(dataset, batch_size, sampler=sampler)
 
 def train_model(model, train_loader, test_loader, *, device='cuda',
-                optimizer='Adam', learning_rate=0.01, patience=30,
+                optimizer='Adam', learning_rate=0.01, patience=20,
                 model_path=None, history_path=None):
     """Train and test the model and return a training history.
 
@@ -147,8 +140,7 @@ def train_model(model, train_loader, test_loader, *, device='cuda',
     start = time_now()
     print(f"[{start:%c}] Training started")
     
-    min_test_loss = 1e8
-    bad_epochs = 0
+    best_epoch = 1
     early_stopping = tqdm(total=patience, desc='Early Stopping', leave=True)
     
     epoch = 1
@@ -182,28 +174,35 @@ def train_model(model, train_loader, test_loader, *, device='cuda',
                 history[k] = []
             history[k].append(v)
 
-        if test_results['loss'] >= min_test_loss:
-            bad_epochs += 1
+        if test_results['loss'] > history['test_loss'][best_epoch-1]:
             early_stopping.update(1)
             
-            if bad_epochs >= patience:
-                best_epoch = epoch - bad_epochs
-                print(f'Early stopping activated at epoch {epoch} - Minimum test loss was {min_test_loss:.3f} at epoch {best_epoch}')
+            if epoch >= best_epoch + patience:
+                print(f"Early stopping activated at epoch {epoch} -",
+                      f"Best epoch: {best_epoch} -",
+                      f"test_loss: {history['test_loss'][best_epoch-1]:.3f} -",
+                      f"test_acc: {history['test_accuracy'][best_epoch-1]:.3f} -",
+                      f"test_recall: {history['test_recall'][best_epoch-1]:.3f} -",
+                      f"test_f1: {history['test_f1'][best_epoch-1]:.3f}")
+                
                 history['early_stopping'] = best_epoch
-                early_stopping.close()
                 break
         
         else:
-            min_test_loss = test_results['loss']
-            save_model(model, model_path)
-            
-            bad_epochs = 0
+            best_epoch = epoch
             early_stopping.reset()
+            save_model(model, model_path)
         
         epoch += 1
     
+    early_stopping.close()
+    
+    model.load_state_dict(torch.load(model_path)['state_dict'])
+    
     now = time_now()
     print(f"[{now:%c}] Training complete - Time elapsed: {time_elapsed(start, now)}")
+    
+    save_history(history, history_path)
     
     return history
 

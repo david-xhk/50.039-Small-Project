@@ -231,8 +231,12 @@ def run_model(model, data_loader, optimizer=None, training=False, progress=False
         model.eval()
         context = torch.no_grad()
     
+    N = len(data_loader)
+    
     if progress:
-        progress_bar = tqdm(total=len(data_loader), desc=desc)
+        progress_bar = tqdm(total=N, desc=desc)
+    
+    class_weights = data_loader.dataset.class_weights.to(model.device)
     
     results = {'loss': 0}
     with context:
@@ -245,35 +249,33 @@ def run_model(model, data_loader, optimizer=None, training=False, progress=False
             logits = model(images)
             output = F.log_softmax(logits, dim=1)
             
-            weights = data_loader.dataset.class_weights
-            current_loss = F.nll_loss(output, labels, weights.to(model.device))
-            results['loss'] += current_loss.item()
+            loss = F.nll_loss(output, labels, class_weights)
+            results['loss'] += loss.item()
             
             y_true = labels.data.cpu()
             y_pred = torch.exp(output).max(dim=1)[1].cpu()
-            weights = weights[labels.long()].cpu()
-            update_results(y_true, y_pred, results, weights)
+            sample_weights = class_weights[labels.long()].cpu()
+            update_results(y_true, y_pred, sample_weights, results)
+            
+            if show_results:
+                plot_results(images, y_true, y_pred, data_loader.dataset.classes)
             
             if training:
-                current_loss.backward()
+                loss.backward()
                 optimizer.step()
             
             if progress:
                 progress_bar.update(1)
-            
+        
         if progress:
             progress_bar.close()
     
-    n = len(data_loader)
     for metric in results:
-        results[metric] /= n
-    
-    if show_results:
-        plot_results(images, y_true, y_pred, data_loader.dataset.classes)
+        results[metric] /= N
     
     return results
 
-def update_results(y_true, y_pred, results=None, weights=None):
+def update_results(y_true, y_pred, weights=None, results=None):
     """Evaluate the accuracy, precision, recall, and F1 scores and update and return the results."""
     if results is None:
         results = {}
